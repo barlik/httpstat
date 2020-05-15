@@ -1,0 +1,165 @@
+#!/bin/bash
+
+# Inspired by https://raw.githubusercontent.com/b4b4r07/httpstat/master/httpstat.sh
+# Alternatives:
+# - pip install httpstat
+# - go get github.com/davecheney/httpstat
+
+usage() {
+cat << EOF
+Usage: httpstat [-v|--verbose] [CURL_OPTIONS]
+       httpstat -h | --help
+Options:
+  CURL_OPTIONS  any curl supported options, except for -w -D -o -S -s,
+                which are already used internally.
+  -v --verbose  show response body.
+  -h --help     show this screen.
+EOF
+}
+
+if [ -t 1 ]; then
+    green="\033[32m"
+    cyan="\033[36m"
+    white="\033[37m"
+    reset="\033[0m"
+fi
+
+verbose=false
+
+while getopts 'hv' opt; do
+    case "$opt" in
+        h) usage; exit 1 ;;
+        v) verbose=true ;;
+    esac
+done
+shift $((OPTIND-1))
+
+die() { echo "$@"; exit 1; }
+
+for arg; do
+    case "$arg" in
+        '-w' | '--write-out') die "Invalid argument: $arg" ;;
+        '-D' | '--dump-header') die "Invalid argument: $arg" ;;
+        '-o' | '--output') die "Invalid argument: $arg" ;;
+        '-s' | '--silent') die "Invalid argument: $arg" ;;
+        '-S' | '--show-error') die "Invalid argument: $arg" ;;
+    esac
+done
+
+curl_vars=(
+    scheme
+    speed_download
+    speed_upload
+    time_namelookup
+    time_connect
+    time_appconnect
+    time_pretransfer
+    time_redirect
+    time_starttransfer
+    time_total
+    local_ip
+    remote_ip
+    url_effective
+)
+
+curl_format=$(printf "%s\n" "${curl_vars[@]}" | sed -E 's/(.*)/\1 %{\1}/')
+
+head="$(mktemp)"
+body="$(mktemp)"
+trap "rm $head $body" EXIT
+
+calc() { awk "BEGIN{print $*}" <<< "$@"; }
+
+data="$(LC_ALL=C curl -w "$curl_format" -D "$head" -o "$body" -s -S "$@")" ||exit
+
+scheme="$(awk '/scheme/{print $2}' <<< "$data")"
+url_effective="$(awk '/url_effective/{print $2}' <<< "$data")"
+speed_download="$(awk '/speed_download/{print $2}' <<< "$data")"
+speed_upload="$(awk '/speed_upload/{print $2}' <<< "$data")"
+
+time_namelookup="$(awk '/time_namelookup/{print $2*1000}' <<< "$data")"
+time_connect="$(awk '/time_connect/{print $2*1000}' <<< "$data")"
+time_appconnect="$(awk '/time_appconnect/{print $2*1000}' <<< "$data")"
+time_pretransfer="$(awk '/time_pretransfer/{print $2*1000}' <<< "$data")"
+time_redirect="$(awk '/time_redirect/{print $2*1000}' <<< "$data")"
+time_starttransfer="$(awk '/time_starttransfer/{print $2*1000}' <<< "$data")"
+time_total="$(awk '/time_total/{print $2*1000}' <<< "$data")"
+
+local_ip="$(awk '/local_ip/{print $2}' <<< "$data")"
+remote_ip="$(awk '/remote_ip/{print $2}' <<< "$data")"
+url_effective="$(awk '/url_effective/{print $2}' <<< "$data")"
+
+range_dns="$time_namelookup"
+range_connection="$(calc "$time_connect" - "$time_namelookup")"
+range_ssl="$(calc "$time_pretransfer" - "$time_connect")"
+range_server="$(calc "$time_starttransfer" - "$time_pretransfer")"
+range_transfer="$(calc "$time_total" - "$time_starttransfer")"
+
+fmta() { awk '{printf("%5dms\n", $1 + 0.5)}' <<< "$1"; }
+fmtb() { awk '{printf("%-7s\n", sprintf("%dms", $1 + 0.5))}' <<< "$1"; }
+
+a000="$cyan$(fmta "$range_dns")$reset"
+a001="$cyan$(fmta "$range_connection")$reset"
+a002="$cyan$(fmta "$range_ssl")$reset"
+a003="$cyan$(fmta "$range_server")$reset"
+a004="$cyan$(fmta "$range_transfer")$reset"
+b000="$cyan$(fmtb "$time_namelookup")$reset"
+b001="$cyan$(fmtb "$time_connect")$reset"
+b002="$cyan$(fmtb "$time_pretransfer")$reset"
+b003="$cyan$(fmtb "$time_starttransfer")$reset"
+b004="$cyan$(fmtb "$time_total")$reset"
+
+http_template="$white
+  DNS Lookup   TCP Connection   Server Processing   Content Transfer$reset
+[   ${a000}  |     ${a001}    |      ${a003}      |      ${a004}     ]
+             |                |                   |                  |
+    namelookup:${b000}        |                   |                  |
+                        connect:${b001}           |                  |
+                                      starttransfer:${b003}          |
+                                                                 total:${b004}
+"
+
+https_template="$white
+  DNS Lookup   TCP Connection   SSL Handshake   Server Processing   Content Transfer$reset
+[   ${a000}  |     ${a001}    |    ${a002}    |      ${a003}      |      ${a004}     ]
+             |                |               |                   |                  |
+    namelookup:${b000}        |               |                   |                  |
+                        connect:${b001}       |                   |                  |
+                                    pretransfer:${b002}           |                  |
+                                                      starttransfer:${b003}          |
+                                                                                 total:${b004}
+"
+
+# Headers
+printf "${cyan}Connected to ${white}%s ${green}(%s) ${cyan}from ${white}%s${reset}\n\n" "$remote_ip" "$url_effective" "$local_ip"
+local_ip="$(awk '/local_ip/{print $2}' <<< "$data")"
+remote_ip="$(awk '/remote_ip/{print $2}' <<< "$data")"
+url_effective="$(awk '/url_effective/{print $2}' <<< "$data")"
+
+while read -r line; do
+        line="${line%%$'\r'}"
+        [[ -z $line ]] && break
+        [[ $line =~ ^(HTTP)(.*)$ ]] && printf "${green}%s${reset}${cyan}%s${reset}\n" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" && continue
+        key="${line%%:*}"
+        val="${line#*: }"
+        printf "${white}%s: ${cyan}%s${reset}\n" "$key" "$val"
+done < "$head"
+
+# Body
+if [[ "$verbose" == true ]]; then
+        echo; cat "$body"
+fi
+
+# Stats
+if [[ "$scheme" =~ HTTPS ]]; then
+        printf "$https_template\n"
+else
+        printf "$http_template\n"
+fi
+
+# Speed
+if [[ "$verbose" == true ]]; then
+        printf "${white}Speed:${reset} download %.1f KiB/s, upload %.1f KiB/s\n" \
+                "$(calc "$speed_download" / 1024)" \
+                "$(calc "$speed_upload" / 1024)"
+fi
